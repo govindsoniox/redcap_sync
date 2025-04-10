@@ -10,7 +10,7 @@
  */
 
 // ================= CONFIGURATION ================= //
-$STARTING_RECORD_ID = 2300; // Initial record ID for first sync
+$STARTING_RECORD_ID = 2362; // Initial record ID for first sync, assuming by this the data exists in both instances for initial load. can be changed to 0 to start form record_id 0, only applicable to very first run.
 
 // Forms to sync
 $forms = [
@@ -19,11 +19,12 @@ $forms = [
     "hads_41783b",
     "dsm5b_o_p_i",
     "mfis_v2",
-    "brief_pain_inventory_bpi_prom"
+    "brief_pain_inventory_bpi_prom",
+    "survey-admin"
 ];
 
 // Load configuration from file
-$config = parse_ini_file('config.ini', true);
+$config = parse_ini_file('/var/config/config.ini', true); //location of the config file
 if ($config === false) {
     die("Failed to load configuration file");
 }
@@ -69,8 +70,8 @@ function redcap_api_call($url, $data) {
     curl_setopt_array($ch, [
         CURLOPT_URL => $url,
         CURLOPT_RETURNTRANSFER => true,
-        CURLOPT_SSL_VERIFYPEER => false,
-        CURLOPT_SSL_VERIFYHOST => 0,
+        CURLOPT_SSL_VERIFYPEER => true, //false for dev, true for prod
+        CURLOPT_SSL_VERIFYHOST => 2, // 0 for dev, 2 for prod
         CURLOPT_POST => true,
         CURLOPT_POSTFIELDS => http_build_query($data),
         CURLOPT_HTTPHEADER => [
