@@ -36,7 +36,7 @@ define('LOG_FILE', 'sync_log.txt');
 define('STATE_FILE', 'sync_state.txt');
 define('ID_TRACKER_FILE', 'last_record_id.txt');
 define('BATCH_SIZE', 500);
-define('REQUIRED_FIELDS', ['record_id']); //list i.e. define('REQUIRED_FIELDS', ['record_id', 'field1', 'field2', 'field3']); 
+define('REQUIRED_FIELDS', ['record_id']); //list i.e. define('REQUIRED_FIELDS', ['record_id', 'field1', 'field2', 'field3']); would only be used to sync from remote to local , for instances where the syncing whole form may not be desired but a few specific fields only from remote to be syncd. 
 
 // --- Helper Functions --- //
 
