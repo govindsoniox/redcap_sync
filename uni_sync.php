@@ -7,6 +7,7 @@
  * - Incremental sync from remote to local (only changed records)
  * - Uses dateRangeBegin to only fetch modified records
  * - Batch processing for efficiency
+ * - Please change the SSL variables for production, keep config.ini out of www root ie /var/config/config.ini . 
  */
 
 // ================= CONFIGURATION ================= //
@@ -35,7 +36,7 @@ define('LOG_FILE', 'sync_log.txt');
 define('STATE_FILE', 'sync_state.txt');
 define('ID_TRACKER_FILE', 'last_record_id.txt');
 define('BATCH_SIZE', 500);
-define('REQUIRED_FIELDS', ['record_id']);
+define('REQUIRED_FIELDS', ['record_id']); //list i.e. define('REQUIRED_FIELDS', ['record_id', 'field1', 'field2', 'field3']); 
 
 // --- Helper Functions --- //
 
