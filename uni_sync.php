@@ -1,17 +1,26 @@
 <?php
 /**
  * REDCap Asymmetric Sync Script - Optimized
- * Version: 2.0
+ * Version: 2.1 (Enhanced)
  * Features:
  * - One-way sync from local to remote (record IDs only)
  * - Incremental sync from remote to local (only changed records)
  * - Uses dateRangeBegin to only fetch modified records
- * - Batch processing for efficiency
- * - Please change the SSL variables for production, keep config.ini out of www root ie /var/config/config.ini . 
+ * - Batch processing for both directions
+ * - Rate limiting for API calls
+ * - Configurable execution limits
  */
 
 // ================= CONFIGURATION ================= //
-$STARTING_RECORD_ID = 2362; // Initial record ID for first sync, assuming by this the data exists in both instances for initial load. can be changed to 0 to start form record_id 0, only applicable to very first run.
+// Operational Parameters
+define('BATCH_SIZE', 800);            // Records per batch
+define('API_RATE_LIMIT', 600);        // Requests per minute
+define('SSL_VERIFY', false);          // SSL verification (false for dev, true for prod)
+define('MAX_EXECUTION_TIME', 120);    // Max runtime in seconds (2 minutes)
+define('MEMORY_LIMIT', '2048M');      // Memory limit for large datasets
+
+// Initial record ID for first sync
+$STARTING_RECORD_ID = 0; // Can be changed to start from a specific record_id
 
 // Forms to sync
 $forms = [
@@ -21,22 +30,77 @@ $forms = [
     "dsm5b_o_p_i",
     "mfis_v2",
     "brief_pain_inventory_bpi_prom",
-    "survey-admin"
+    "survey_admin"
 ];
 
 // Load configuration from file
-$config = parse_ini_file('/var/config/config.ini', true); //location of the config file
+$config = parse_ini_file('/var/config/config.ini', true);
 if ($config === false) {
     die("Failed to load configuration file");
 }
+
+// Set runtime limits
+ini_set('max_execution_time', MAX_EXECUTION_TIME);
+ini_set('memory_limit', MEMORY_LIMIT);
 // ================================================= //
 
 // Constants
 define('LOG_FILE', 'sync_log.txt');
 define('STATE_FILE', 'sync_state.txt');
 define('ID_TRACKER_FILE', 'last_record_id.txt');
-define('BATCH_SIZE', 500);
-define('REQUIRED_FIELDS', ['record_id']); //list i.e. define('REQUIRED_FIELDS', ['record_id', 'field1', 'field2', 'field3']); would only be used to sync from remote to local , for instances where the syncing whole form may not be desired but a few specific fields only from remote to be syncd. 
+define('REQUIRED_FIELDS', ['record_id']);
+
+// Rate Limiter Class
+class RateLimiter {
+    private $rate;
+    private $per;
+    private $last_check;
+    private $allowance;
+    private $api_call_count = 0;
+    private $minute_start;
+    private $calls_this_minute = 0;
+    
+    public function __construct($rate, $per) {
+        $this->rate = $rate;
+        $this->per = $per;
+        $this->last_check = microtime(true);
+        $this->allowance = $rate;
+        $this->minute_start = time();
+    }
+    
+    public function check() {
+        $this->api_call_count++;
+        $this->calls_this_minute++;
+        
+        // Reset minute counter if new minute
+        if (time() - $this->minute_start >= 60) {
+            $this->minute_start = time();
+            $this->calls_this_minute = 1;
+        }
+        
+        $current = microtime(true);
+        $time_passed = $current - $this->last_check;
+        $this->last_check = $current;
+        
+        $this->allowance += $time_passed * ($this->rate / $this->per);
+        if ($this->allowance > $this->rate) $this->allowance = $this->rate;
+        
+        if ($this->allowance < 1.0) {
+            usleep((1.0 - $this->allowance) * ($this->per / $this->rate) * 1000000);
+            $this->allowance = 1.0;
+        }
+        
+        $this->allowance -= 1.0;
+    }
+    
+    public function getStats() {
+        return [
+            'total_calls' => $this->api_call_count,
+            'current_minute_calls' => $this->calls_this_minute,
+            'current_minute_start' => date('Y-m-d H:i:s', $this->minute_start)
+        ];
+    }
+}
 
 // --- Helper Functions --- //
 
@@ -64,15 +128,18 @@ function log_message($message) {
     $timestamp = date('Y-m-d H:i:s');
     $log_entry = "[$timestamp] $message\n";
     file_put_contents(LOG_FILE, $log_entry, FILE_APPEND);
+    echo $log_entry;
 }
 
-function redcap_api_call($url, $data) {
+function redcap_api_call($url, $data, $rateLimiter = null) {
+    if ($rateLimiter) $rateLimiter->check();
+
     $ch = curl_init();
     curl_setopt_array($ch, [
         CURLOPT_URL => $url,
         CURLOPT_RETURNTRANSFER => true,
-        CURLOPT_SSL_VERIFYPEER => true, //false for dev, true for prod
-        CURLOPT_SSL_VERIFYHOST => 2, // 0 for dev, 2 for prod
+        CURLOPT_SSL_VERIFYPEER => SSL_VERIFY,
+        CURLOPT_SSL_VERIFYHOST => SSL_VERIFY ? 2 : 0,
         CURLOPT_POST => true,
         CURLOPT_POSTFIELDS => http_build_query($data),
         CURLOPT_HTTPHEADER => [
@@ -85,7 +152,12 @@ function redcap_api_call($url, $data) {
 
     $response = curl_exec($ch);
     $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    $error = curl_error($ch);
     curl_close($ch);
+
+    if ($response === false) {
+        throw new Exception("CURL Error: $error");
+    }
 
     if ($http_code != 200) {
         throw new Exception("API Error $http_code: " . substr($response, 0, 500));
@@ -101,12 +173,13 @@ function redcap_api_call($url, $data) {
 
 // --- Sync Functions --- //
 
-function sync_local_to_remote() {
+function sync_local_to_remote($rateLimiter) {
     global $config;
     
     $last_id = get_last_record_id();
     $last_sync = get_last_sync_time();
-    log_message("Starting local to remote sync from record ID: $last_id");
+    log_message("=== LOCAL → REMOTE SYNC ===");
+    log_message("Starting from record ID: $last_id");
     
     // Export new record IDs from local
     $export_params = [
@@ -124,7 +197,7 @@ function sync_local_to_remote() {
         $export_params['dateRangeBegin'] = $last_sync;
     }
 
-    $records = redcap_api_call($config['api']['local_url'], $export_params);
+    $records = redcap_api_call($config['api']['local_url'], $export_params, $rateLimiter);
     
     if (empty($records)) {
         log_message("No new records found to create in remote");
@@ -133,16 +206,17 @@ function sync_local_to_remote() {
 
     $created_count = 0;
     $max_id = $last_id;
+    $batch_count = 0;
 
-    foreach ($records as $record) {
-        if (!isset($record['record_id'])) continue;
+    foreach (array_chunk($records, BATCH_SIZE) as $batch) {
+        $batch_count++;
+        $batch_stats = $rateLimiter->getStats();
+        log_message("Processing batch $batch_count - API calls this minute: {$batch_stats['current_minute_calls']}");
         
-        $current_id = (int)$record['record_id'];
-        if ($current_id > $max_id) {
-            $max_id = $current_id;
-        }
+        // Prepare batch data
+        $import_data = array_map(function($r) { return ['record_id' => $r['record_id']]; }, $batch);
         
-        // Create record in remote
+        // Create records in remote
         $import_params = [
             'token' => $config['tokens']['remote_token'],
             'content' => 'record',
@@ -150,14 +224,19 @@ function sync_local_to_remote() {
             'type' => 'flat',
             'overwriteBehavior' => 'normal',
             'forceAutoNumber' => 'false',
-            'data' => json_encode([['record_id' => $current_id]]),
+            'data' => json_encode($import_data),
             'returnContent' => 'count',
             'returnFormat' => 'json'
         ];
 
-        $result = redcap_api_call($config['api']['remote_url'], $import_params);
+        $result = redcap_api_call($config['api']['remote_url'], $import_params, $rateLimiter);
         $created_count += $result['count'] ?? 0;
-        log_message("Created remote record: $current_id");
+        
+        // Track highest ID
+        $current_max = max(array_column($batch, 'record_id'));
+        if ($current_max > $max_id) {
+            $max_id = $current_max;
+        }
     }
     
     if ($max_id > $last_id) {
@@ -165,13 +244,16 @@ function sync_local_to_remote() {
         log_message("Updated last record ID to: $max_id");
     }
     
+    log_message("Records created in remote: $created_count");
+    log_message("=== LOCAL → REMOTE COMPLETE ===");
     return $created_count;
 }
 
-function sync_remote_to_local() {
+function sync_remote_to_local($rateLimiter) {
     global $config, $forms;
     
     $last_sync = get_last_sync_time();
+    log_message("=== REMOTE → LOCAL SYNC ===");
     
     if ($last_sync === null) {
         log_message("Performing initial full sync from remote to local");
@@ -206,7 +288,7 @@ function sync_remote_to_local() {
         $export_params['dateRangeBegin'] = $last_sync;
     }
 
-    $records = redcap_api_call($config['api']['remote_url'], $export_params);
+    $records = redcap_api_call($config['api']['remote_url'], $export_params, $rateLimiter);
     
     if (empty($records)) {
         log_message("No records modified in remote since last sync");
@@ -214,8 +296,13 @@ function sync_remote_to_local() {
     }
 
     $imported_count = 0;
+    $batch_count = 0;
 
     foreach (array_chunk($records, BATCH_SIZE) as $batch) {
+        $batch_count++;
+        $batch_stats = $rateLimiter->getStats();
+        log_message("Processing batch $batch_count - API calls this minute: {$batch_stats['current_minute_calls']}");
+        
         $import_params = [
             'token' => $config['tokens']['local_token'],
             'content' => 'record',
@@ -228,11 +315,12 @@ function sync_remote_to_local() {
             'returnFormat' => 'json'
         ];
 
-        $result = redcap_api_call($config['api']['local_url'], $import_params);
+        $result = redcap_api_call($config['api']['local_url'], $import_params, $rateLimiter);
         $imported_count += $result['count'] ?? 0;
     }
     
-    log_message("Imported $imported_count records from remote to local");
+    log_message("Records imported to local: $imported_count");
+    log_message("=== REMOTE → LOCAL COMPLETE ===");
     return $imported_count;
 }
 
@@ -240,27 +328,31 @@ function sync_remote_to_local() {
 
 try {
     $start_time = microtime(true);
-    log_message("Starting sync process");
+    $rateLimiter = new RateLimiter(API_RATE_LIMIT, 60);
+    log_message("=== SYNC STARTED ===");
 
     // Step 1: Create new records in remote (local → remote)
-    $created_remote = sync_local_to_remote();
+    $created_remote = sync_local_to_remote($rateLimiter);
     
     // Step 2: Sync only changed data from remote to local
-    $imported_local = sync_remote_to_local();
+    $imported_local = sync_remote_to_local($rateLimiter);
 
     // Update sync time only if successful
     update_sync_time();
     
     $duration = round(microtime(true) - $start_time, 2);
-    log_message(sprintf(
-        "Sync completed in {$duration}s. Created %d remote records, imported %d local records. Highest ID: %d",
-        $created_remote,
-        $imported_local,
-        get_last_record_id()
-    ));
+    $stats = $rateLimiter->getStats();
+    
+    log_message("=== FINAL STATISTICS ===");
+    log_message("Sync completed in {$duration}s");
+    log_message("API calls made: {$stats['total_calls']}");
+    log_message("Records created in remote: $created_remote");
+    log_message("Records imported to local: $imported_local");
+    log_message("Highest ID processed: " . get_last_record_id());
+    log_message("=== SYNC COMPLETED ===\n");
 
 } catch (Exception $e) {
-    $error_message = "SYNC FAILED: " . $e->getMessage();
+    $error_message = "=== SYNC FAILED ===\n" . $e->getMessage();
     log_message($error_message);
     die($error_message);
 }
