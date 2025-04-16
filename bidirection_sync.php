@@ -86,7 +86,7 @@ $REMOTE_TO_LOCAL_CONFIG = [
 
 
 // Load API configuration
-$config = parse_ini_file('config.ini', true);
+$config = parse_ini_file('/var/config/config.ini', true);
 if ($config === false) {
     die("Failed to load configuration file");
 }
