@@ -79,7 +79,7 @@ $REMOTE_TO_LOCAL_CONFIG = [
     ],
     'fields' => [
         'record_id',
-        'email'
+        'postcode'
     ]
 ];
 
