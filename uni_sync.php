@@ -8,7 +8,7 @@
  * - Uses dateRangeBegin to only fetch modified records
  * - Batch processing for both directions
  * - Rate limiting for API calls
- * - Configurable execution limits
+ * - Configurable execution limits 
  */
 
 // ================= CONFIGURATION ================= //
