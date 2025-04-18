@@ -1,19 +1,19 @@
 <?php
 /**
  * REDCap Project Configuration Sync Script
- * Version: 2.0
+ * Version: 2.1
  * 
- * Syncs project configuration from remote to local including:
+ * Syncs project configuration from local to remote including:
  * 1. Metadata (Data Dictionary)
  * 2. Project Information
  * 3. Repeating Instruments/Events
  * 4. Data Access Groups (DAGs)
- * 5. Events (for longitudinal studies)
+ * 5. Events (for longitudinal studies only)
  */
 
 // ================= CONFIGURATION ================= //
 // Load configuration from file
-$config = parse_ini_file('/var/config/config_project_sync.ini', true);
+$config = parse_ini_file('/var/config/config.ini', true);
 if ($config === false) {
     die("Failed to load configuration file");
 }
@@ -25,16 +25,6 @@ ini_set('memory_limit', '1024M');      // 1GB memory
 // Constants
 define('LOG_FILE', 'config_sync_log.txt');
 define('STATE_FILE', 'config_sync_state.txt');
-
-// Non-interactive mode flags (set these to true/false to run without prompts)
-$SYNC_METADATA = true;
-$SYNC_PROJECT_INFO = true;
-$SYNC_REPEATING = true;
-$SYNC_DAGS = true;
-$SYNC_EVENTS = true;
-$OVERRIDE_EVENTS = false; // Set to true to delete all existing events before import
-
-// ================================================= //
 
 // --- Helper Functions --- //
 
@@ -83,8 +73,23 @@ function redcap_api_call($url, $data) {
     return $decoded;
 }
 
+function is_project_longitudinal($config) {
+    $params = [
+        'token' => $config['tokens']['local_token'],
+        'content' => 'project',
+        'format' => 'json',
+        'returnFormat' => 'json'
+    ];
+    
+    $project_info = redcap_api_call($config['api']['local_url'], $params);
+    return (bool)$project_info['is_longitudinal'];
+}
+
 function get_user_options() {
     global $SYNC_METADATA, $SYNC_PROJECT_INFO, $SYNC_REPEATING, $SYNC_DAGS, $SYNC_EVENTS, $OVERRIDE_EVENTS;
+    
+    // Check if project is longitudinal
+    $is_longitudinal = is_project_longitudinal($GLOBALS['config']);
     
     // Check if any sync option is already set (non-interactive mode)
     if ($SYNC_METADATA || $SYNC_PROJECT_INFO || $SYNC_REPEATING || $SYNC_DAGS || $SYNC_EVENTS) {
@@ -93,7 +98,7 @@ function get_user_options() {
             'project_info' => $SYNC_PROJECT_INFO,
             'repeating' => $SYNC_REPEATING,
             'dags' => $SYNC_DAGS,
-            'events' => $SYNC_EVENTS,
+            'events' => $is_longitudinal && $SYNC_EVENTS, // Only sync events if project is longitudinal
             'override_events' => $OVERRIDE_EVENTS
         ];
     }
@@ -104,13 +109,20 @@ function get_user_options() {
     echo "2. Sync Project Information\n";
     echo "3. Sync Repeating Instruments/Events\n";
     echo "4. Sync Data Access Groups (DAGs)\n";
-    echo "5. Sync Events (for longitudinal studies)\n";
-    echo "6. Sync All (1+2+3+4+5)\n";
+    
+    $max_choice = 6;
+    if ($is_longitudinal) {
+        echo "5. Sync Events (for longitudinal studies)\n";
+        echo "6. Sync All (1+2+3+4+5)\n";
+    } else {
+        echo "6. Sync All (1+2+3+4)\n";
+    }
     echo "Enter your choice (1-6): ";
     
     $choice = trim(fgets(STDIN));
-    while (!in_array($choice, ['1', '2', '3', '4', '5', '6'])) {
-        echo "Invalid choice. Please enter 1-6: ";
+    $valid_choices = $is_longitudinal ? ['1','2','3','4','5','6'] : ['1','2','3','4','6'];
+    while (!in_array($choice, $valid_choices)) {
+        echo "Invalid choice. Please enter 1-" . ($is_longitudinal ? '6' : '4 or 6') . ": ";
         $choice = trim(fgets(STDIN));
     }
     
@@ -119,7 +131,7 @@ function get_user_options() {
         'project_info' => in_array($choice, ['2', '6']),
         'repeating' => in_array($choice, ['3', '6']),
         'dags' => in_array($choice, ['4', '6']),
-        'events' => in_array($choice, ['5', '6']),
+        'events' => $is_longitudinal && in_array($choice, ['5', '6']),
         'override_events' => false
     ];
     
@@ -137,47 +149,50 @@ function get_user_options() {
 function sync_metadata($config) {
     log_message("Starting Metadata (Data Dictionary) sync");
     
-    // Export metadata from remote
+    // Export metadata from local
     $export_params = [
-        'token' => $config['tokens']['remote_token'],
+        'token' => $config['tokens']['local_token'],
         'content' => 'metadata',
         'format' => 'json',
         'returnFormat' => 'json'
     ];
     
-    $metadata = redcap_api_call($config['api']['remote_url'], $export_params);
-    log_message("Exported " . count($metadata) . " fields from remote");
+    $metadata = redcap_api_call($config['api']['local_url'], $export_params);
+    log_message("Exported " . count($metadata) . " fields from local");
     
-    // Import metadata to local
+    // Import metadata to remote
     $import_params = [
-        'token' => $config['tokens']['local_token'],
+        'token' => $config['tokens']['remote_token'],
         'content' => 'metadata',
         'format' => 'json',
         'data' => json_encode($metadata),
         'returnFormat' => 'json'
     ];
     
-    $result = redcap_api_call($config['api']['local_url'], $import_params);
-    log_message("Imported " . $result . " fields to local");
+    $result = redcap_api_call($config['api']['remote_url'], $import_params);
+    log_message("Imported " . $result . " fields to remote");
     
     return $result;
 }
 
+
+
+
 function sync_project_info($config) {
     log_message("Starting Project Information sync");
     
-    // Export project info from remote
+    // Export project info from local
     $export_params = [
-        'token' => $config['tokens']['remote_token'],
+        'token' => $config['tokens']['local_token'],
         'content' => 'project',
         'format' => 'json',
         'returnFormat' => 'json'
     ];
     
-    $project_info = redcap_api_call($config['api']['remote_url'], $export_params);
-    log_message("Exported project info from remote");
+    $project_info = redcap_api_call($config['api']['local_url'], $export_params);
+    log_message("Exported project info from local");
     
-    // Prepare data for import (only updatable fields)
+    // Prepare complete data for import with all available fields
     $import_data = [
         'project_title' => $project_info['project_title'],
         'project_language' => $project_info['project_language'],
@@ -196,54 +211,70 @@ function sync_project_info($config) {
         'project_pi_firstname' => $project_info['project_pi_firstname'] ?? '',
         'project_pi_lastname' => $project_info['project_pi_lastname'] ?? '',
         'display_today_now_button' => $project_info['display_today_now_button'],
-        'bypass_branching_erase_field_prompt' => $project_info['bypass_branching_erase_field_prompt'] ?? 0
+        'bypass_branching_erase_field_prompt' => $project_info['bypass_branching_erase_field_prompt'] ?? 0,
+        'missing_data_codes' => $project_info['missing_data_codes'] ?? ''
     ];
     
-    // Import project info to local
+    // Handle external modules if they exist
+    if (isset($project_info['external_modules'])) {
+        $import_data['external_modules'] = $project_info['external_modules'];
+    }
+    
+    // Import project info to remote using project_settings API
     $import_params = [
-        'token' => $config['tokens']['local_token'],
+        'token' => $config['tokens']['remote_token'],
         'content' => 'project_settings',
         'format' => 'json',
         'data' => json_encode($import_data),
         'returnFormat' => 'json'
     ];
     
-    $result = redcap_api_call($config['api']['local_url'], $import_params);
-    log_message("Updated " . $result . " project settings in local");
+    $result = redcap_api_call($config['api']['remote_url'], $import_params);
+    log_message("Updated " . $result . " project settings in remote");
     
     return $result;
 }
 
+
+
+
+
+
+
+
+
+
+
 function sync_repeating_instruments($config) {
     log_message("Starting Repeating Instruments/Events sync");
     
-    // Export repeating instruments from remote
+    // Export repeating instruments from local
     $export_params = [
-        'token' => $config['tokens']['remote_token'],
+        'token' => $config['tokens']['local_token'],
         'content' => 'repeatingFormsEvents',
         'format' => 'json',
         'returnFormat' => 'json'
     ];
     
-    $repeating = redcap_api_call($config['api']['remote_url'], $export_params);
-    log_message("Exported " . count($repeating) . " repeating instruments/events from remote");
+    $repeating = redcap_api_call($config['api']['local_url'], $export_params);
+    log_message("Exported " . count($repeating) . " repeating instruments/events from local");
     
     if (empty($repeating)) {
         log_message("No repeating instruments/events to sync");
         return 0;
     }
     
-    // Import repeating instruments to local
+    // Import repeating instruments to remote
     $import_params = [
-        'token' => $config['tokens']['local_token'],
+        'token' => $config['tokens']['remote_token'],
         'content' => 'repeatingFormsEvents',
         'format' => 'json',
         'data' => json_encode($repeating),
         'returnFormat' => 'json'
     ];
     
-    $result = redcap_api_call($config['api']['local_url'], $import_params);
-    log_message("Imported " . $result . " repeating instruments/events to local");
+    $result = redcap_api_call($config['api']['remote_url'], $import_params);
+    log_message("Imported " . $result . " repeating instruments/events to remote");
     
     return $result;
 }
@@ -251,34 +282,41 @@ function sync_repeating_instruments($config) {
 function sync_dags($config) {
     log_message("Starting Data Access Groups (DAGs) sync");
     
-    // Export DAGs from remote
+    // Export DAGs from local
     $export_params = [
-        'token' => $config['tokens']['remote_token'],
+        'token' => $config['tokens']['local_token'],
         'content' => 'dag',
         'format' => 'json',
         'returnFormat' => 'json'
     ];
     
-    $dags = redcap_api_call($config['api']['remote_url'], $export_params);
-    log_message("Exported " . count($dags) . " DAGs from remote");
+    $dags = redcap_api_call($config['api']['local_url'], $export_params);
+    log_message("Exported " . count($dags) . " DAGs from local");
     
     if (empty($dags)) {
         log_message("No DAGs to sync");
         return 0;
     }
     
-    // Import DAGs to local
+    // Blank out the unique_group_name and data_access_group_id fields
+    $modified_dags = array_map(function($dag) {
+        $dag['unique_group_name'] = '';
+        $dag['data_access_group_id'] = '';
+        return $dag;
+    }, $dags);
+    
+    // Import DAGs to remote
     $import_params = [
-        'token' => $config['tokens']['local_token'],
+        'token' => $config['tokens']['remote_token'],
         'content' => 'dag',
         'action' => 'import',
         'format' => 'json',
-        'data' => json_encode($dags),
+        'data' => json_encode($modified_dags),
         'returnFormat' => 'json'
     ];
     
-    $result = redcap_api_call($config['api']['local_url'], $import_params);
-    log_message("Imported " . $result . " DAGs to local");
+    $result = redcap_api_call($config['api']['remote_url'], $import_params);
+    log_message("Imported " . $result . " DAGs to remote");
     
     return $result;
 }
@@ -286,25 +324,25 @@ function sync_dags($config) {
 function sync_events($config, $override = false) {
     log_message("Starting Events sync");
     
-    // Export events from remote
+    // Export events from local
     $export_params = [
-        'token' => $config['tokens']['remote_token'],
+        'token' => $config['tokens']['local_token'],
         'content' => 'event',
         'format' => 'json',
         'returnFormat' => 'json'
     ];
     
-    $events = redcap_api_call($config['api']['remote_url'], $export_params);
-    log_message("Exported " . count($events) . " events from remote");
+    $events = redcap_api_call($config['api']['local_url'], $export_params);
+    log_message("Exported " . count($events) . " events from local");
     
     if (empty($events)) {
         log_message("No events to sync");
         return 0;
     }
     
-    // Import events to local
+    // Import events to remote
     $import_params = [
-        'token' => $config['tokens']['local_token'],
+        'token' => $config['tokens']['remote_token'],
         'content' => 'event',
         'action' => 'import',
         'override' => $override ? 1 : 0,
@@ -313,8 +351,8 @@ function sync_events($config, $override = false) {
         'returnFormat' => 'json'
     ];
     
-    $result = redcap_api_call($config['api']['local_url'], $import_params);
-    log_message("Imported " . $result . " events to local");
+    $result = redcap_api_call($config['api']['remote_url'], $import_params);
+    log_message("Imported " . $result . " events to remote");
     
     return $result;
 }
@@ -323,6 +361,14 @@ function sync_events($config, $override = false) {
 
 try {
     log_message("=== CONFIGURATION SYNC STARTED ===");
+    
+    // Set default sync flags
+    $SYNC_METADATA = true;
+    $SYNC_PROJECT_INFO = true;
+    $SYNC_REPEATING = true;
+    $SYNC_DAGS = true;
+    $SYNC_EVENTS = true;
+    $OVERRIDE_EVENTS = false;
     
     // Get user options
     $options = get_user_options();
